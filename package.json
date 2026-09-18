@@ -41,7 +41,7 @@
         {
           "target": "dmg",
           "arch": [
-            "x64"
+            "universal"
           ]
         }
       ]
@@ -55,6 +55,9 @@
     },
     "portable": {
       "artifactName": "${productName}-Portable-${version}-${os}.${ext}"
+    },
+    "dmg": {
+      "title": "${productName} ${version}"
     },
     "extraFiles": [
       {
