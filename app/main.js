@@ -66,6 +66,47 @@ let defaultConfigDetails = {
 const updatedPluginsFolder = path.join(app.getPath('temp'), 'SWEX', 'plugins');
 
 let quitting = false;
+let tray = null;
+let bounds = undefined;
+
+function restoreWindowFromSystemTray() {
+  if (global.win.isDestroyed()) {
+    createWindow();
+    return;
+  }
+
+  global.win.show();
+  if (bounds) {
+    global.win.setBounds(bounds);
+    bounds = undefined;
+  }
+}
+
+function updateTray() {
+  if (!proxy.isRunning() && !config.Config.App.minimizeToTray) {
+    tray?.destroy();
+    tray = null;
+    return;
+  }
+  if (tray) return;
+
+  tray = new Tray(trayIconPath);
+  tray.on('double-click', restoreWindowFromSystemTray);
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: 'Show',
+      click: restoreWindowFromSystemTray,
+    },
+    {
+      label: 'Quit',
+      click: function () {
+        app.quit();
+      },
+    },
+  ]);
+  tray.setContextMenu(contextMenu);
+}
 
 function createWindow() {
   let mainWindowState = windowStateKeeper({
@@ -92,39 +133,11 @@ function createWindow() {
 
   global.mainWindowId = win.id;
 
-  function restoreWindowFromSystemTray() {
-    global.win.show();
-    if (bounds) {
-      global.win.setBounds(bounds);
-      bounds = undefined;
-    }
-  }
-
-  let appIcon = null;
-  let bounds = undefined;
-  app.whenReady().then(() => {
-    appIcon = new Tray(trayIconPath);
-    appIcon.on('double-click', restoreWindowFromSystemTray);
-    const contextMenu = Menu.buildFromTemplate([
-      {
-        label: 'Show',
-        click: restoreWindowFromSystemTray,
-      },
-      {
-        label: 'Quit',
-        click: function () {
-          app.quit();
-        },
-      },
-    ]);
-
-    appIcon.setContextMenu(contextMenu);
-  });
-
-  // macOS keeps the app running without windows, so hide instead of destroying the window
-  // to let the tray and dock bring it back. Once the app quits, closing must work again.
+  // macOS keeps the app running without windows. While the proxy is running, hide instead of destroying the window
+  // to let the tray and dock bring it back, otherwise the dock recreates it. Once the app quits, closing must work again.
   if (process.platform === 'darwin') {
     const hideOnClose = (event) => {
+      if (!proxy.isRunning()) return;
       event.preventDefault();
       global.win.hide();
     };
@@ -169,7 +182,7 @@ ipcMain.on('proxyGetInterfaces', (event) => {
 });
 
 ipcMain.on('proxyStart', (event, steamMode) => {
-  proxy.start(config.Config.Proxy.port, steamMode);
+  proxy.start(config.Config.Proxy.port, steamMode).then(updateTray);
   if (steamMode !== config.Config.Proxy.steamMode) {
     config.Config.Proxy.steamMode = steamMode;
     storage.set('Config', config.Config, (error) => {
@@ -181,7 +194,7 @@ ipcMain.on('proxyStart', (event, steamMode) => {
 });
 
 ipcMain.on('proxyStop', () => {
-  proxy.stop();
+  proxy.stop().then(updateTray);
 });
 
 ipcMain.on('getCert', async () => {
@@ -215,6 +228,7 @@ ipcMain.on('getAndInstallCertSteam', async () => {
 
 ipcMain.on('reGenCert', async () => {
   await proxy.reGenCert();
+  updateTray();
 });
 
 ipcMain.on('logGetEntries', (event) => {
@@ -225,6 +239,7 @@ ipcMain.on('updateConfig', () => {
   storage.set('Config', config.Config, (error) => {
     if (error) throw error;
   });
+  updateTray();
 });
 
 ipcMain.on('getFolderLocations', (event) => {
@@ -528,6 +543,7 @@ app.on('ready', async () => {
 
     global.config = _.merge(defaultConfig, data);
     global.config.ConfigDetails = defaultConfigDetails.ConfigDetails;
+    updateTray();
 
     fs.ensureDirSync(global.config.Config.App.filesPath);
     fs.ensureDirSync(path.join(global.config.Config.App.filesPath, 'plugins'));
@@ -539,7 +555,8 @@ app.on('ready', async () => {
     updatePlugins(global.plugins);
 
     if (process.env.autostart || global.config.Config.Proxy.autoStart) {
-      proxy.start(process.env.port || config.Config.Proxy.port, config.Config.Proxy.steamMode);
+      const port = process.env.port || config.Config.Proxy.port;
+      proxy.start(port, config.Config.Proxy.steamMode).then(updateTray);
     }
   });
 });
@@ -553,8 +570,12 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
-  // On macOS, clicking the dock icon brings back the window hidden on close.
-  global.win?.show();
+  // On macOS, clicking the dock icon brings back the window hidden on close or recreates the closed one.
+  if (global.win?.isDestroyed()) {
+    createWindow();
+  } else {
+    global.win?.show();
+  }
 });
 
 app.on('before-quit', async (event) => {
